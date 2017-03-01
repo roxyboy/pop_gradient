@@ -266,24 +266,25 @@ class POPFile(object):
             result /= len(slices)
         return result
     
-    def aggregate_latlon(self, lat, lon, varname='SST', latbound=90., lonbound=180., dlat=1, dlon=1):
+    def aggregate_latlon(self, lat, lon, varname='SST', istart=0, iend=3500, jstart=400, jend=2000,
+                         roll=-1100, south=-90., north=90., west=-180., east=180., dlat=1, dlon=1):
         """Aggregate data based on lat-lon grids
         """
-        T = self.nc[varname].values
+        T = self.nc[varname].roll(nlon=roll).values[:, jstart:jend, istart:iend]
         Nt = T.shape[0]
         if T.ndim == 3:
-            Tagg = np.empty((Nt, int(2*latbound/dlat), int(2*lonbound/dlon)))
+            Tagg = np.empty((Nt, int((north-south)/dlat), int((east-west)/dlon)))
         elif T.ndim == 4:
             Nt, Nz, Ny, Nx = T.shape
-            Tagg = np.empty((Nt, Nz, int(2*latbound/dlat), int(2*lonbound/dlon)))
+            Tagg = np.empty((Nt, Nz, int((north-south)/dlat), int((east-west)/dlon)))
         Tagg[:] = np.nan
         
-        j = 0; south = -latbound
-        while south < latbound:
-            i = 0; west = -lonbound
-            while west < lonbound:
-                lonrange = np.array([west, west+dlon])
-                latrange = np.array([south, south+dlat])
+        j = 0; s = south
+        while s < north:
+            i = 0; w = west
+            while w < east:
+                lonrange = np.array([w, w+dlon])
+                latrange = np.array([s, s+dlat])
                 lonmask = (lon >= lonrange[0]) & (lon < lonrange[1])
                 latmask = (lat >= latrange[0]) & (lat < latrange[1])
                 boxidx = lonmask & latmask # this won't necessarily be square
@@ -297,9 +298,9 @@ class POPFile(object):
                     for t in range(Nt):
                         Tagg[t, j, i] = np.ma.mean(np.ma.masked_array(T[t, jmin:jmax, imin:imax], ~region_mask))
                 
-                west += dlon
+                w += dlon
                 i += 1
-            south += dlat
+            s += dlat
             j += 1
             
         return Tagg
