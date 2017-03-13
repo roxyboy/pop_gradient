@@ -1,13 +1,14 @@
 import numpy as np
 import xarray as xray
+import pandas as pd
 import netCDF4
 import warnings
 import sys
 from warnings import warn
 from scipy import linalg as lin
-from scipy import signal as sig
-from scipy import fftpack as fft
 from scipy import interpolate as naiso
+from scipy.spatial import cKDTree, KDTree
+from itertools import repeat
 import gsw
 
 class POPFile(object):
@@ -71,7 +72,7 @@ class POPFile(object):
         # Tracer
         ############
         if field == 'tracer':
-            self.mask = self.nc.KMT > 1
+            # self.mask = self.nc.KMT > 1
             ###########
             # raw grid geometry
             ###########
@@ -102,7 +103,7 @@ class POPFile(object):
             #############
             j_eq = np.argmin(self.nc['ULAT'][:,0].values**2)
             self._ahf = (tarea / self.nc['UAREA'].values[j_eq,0])**1.5
-            self._ahf[self.mask] = 0.   
+            self._ahf[self.maskT] = 0.   
 
             ###########
             # stuff for gradient
@@ -117,7 +118,7 @@ class POPFile(object):
         elif field == 'momentum':
             p5 = .5
             c2 = 2.
-            self.mask = self.nc.KMU > 1
+            # self.mask = self.nc.KMU > 1
             hus = 1e-2 * self.nc.HUS.values
             self._hus = hus
             hte = 1e-2 * self.nc.HTE.values
@@ -195,7 +196,7 @@ class POPFile(object):
             #############
             j_eq = np.argmin(self.nc['ULAT'][:,0].values**2)
             self._amf = np.ma.masked_array((uarea 
-                                   / uarea[j_eq, 0])**1.5, ~self.mask).filled(0.)
+                                   / uarea[j_eq, 0])**1.5, ~self.maskU).filled(0.)
     
     def interpolate_2d(self, Ti, meth='linear'):
         """Interpolate a 2D field
@@ -266,41 +267,100 @@ class POPFile(object):
             result /= len(slices)
         return result
     
-    def aggregate_latlon(self, lat, lon, varname='SST', istart=0, iend=3500, jstart=400, jend=2000,
-                         roll=-1100, south=-90., north=90., west=-180., east=180., dlat=1, dlon=1):
-        """Aggregate data based on lat-lon grids
+    def aggregate_latlon(self, lat, lon, newlat, newlon, 
+                         varname='SST', 
+                         istart=0, iend=3500, jstart=400, jend=2000, 
+                         nroll=-1100, cython=True):
         """
-        T = self.nc[varname].roll(nlon=roll).values[:, jstart:jend, istart:iend]
-        Nt = T.shape[0]
-        if T.ndim == 3:
-            Tagg = np.empty((Nt, int((north-south)/dlat), int((east-west)/dlon)))
-        elif T.ndim == 4:
-            Nt, Nz, Ny, Nx = T.shape
-            Tagg = np.empty((Nt, Nz, int((north-south)/dlat), int((east-west)/dlon)))
-        Tagg[:] = np.nan
+        Parameters
+        --------------
+        ds : xarray.Dataset
+            raw data
+        lat : numpy.array
+            raw latitude
+        lon: numpy.array
+            raw longitude
+        newlat: numpy.array
+            latitude coordinate to regrid on
+        newlon: numpy.array
+            longitude coordinate to regrid on
+
+        Returns
+        -------------
+        da : xarray.Dataset
+            new dataset with labels added
+        """
+        data = self.nc[varname].where(self.maskT).roll(nlon=nroll)
+        assert data.values.ndim == 3
+        assert lat.ndim == 2
+        assert lon.ndim == 2
+        assert np.isnan(lat).any() == False
+        assert np.isnan(lon).any() == False
         
-        j = 0; s = south
-        while s < north:
-            i = 0; w = west
-            while w < east:
-                lonrange = np.array([w, w+dlon])
-                latrange = np.array([s, s+dlat])
-                lonmask = (lon >= lonrange[0]) & (lon < lonrange[1])
-                latmask = (lat >= latrange[0]) & (lat < latrange[1])
-                boxidx = lonmask & latmask # this won't necessarily be square
-                irange = np.where(boxidx.sum(axis=0))[0]
-                imin, imax = irange.min(), irange.max()
-                jrange = np.where(boxidx.sum(axis=1))[0]
-                jmin, jmax = jrange.min(), jrange.max()
-                
-                region_mask = self.maskT.values[jmin:jmax, imin:imax]
-                if T.ndim == 3:
-                    for t in range(Nt):
-                        Tagg[t, j, i] = np.ma.mean(np.ma.masked_array(T[t, jmin:jmax, imin:imax], ~region_mask))
-                
-                w += dlon
-                i += 1
-            s += dlat
-            j += 1
-            
-        return Tagg
+        ncoords = len(data.coords.keys())
+        timecoords = data.coords.keys()[0]
+        latcoords = data.coords.keys()[-2]
+        loncoords = data.coords.keys()[-1]
+        if ncoords-3 == 0:
+            pass
+        else:
+            unnescoords = []
+            for i in range(ncoords-3):
+                unnescoords.append(data.coords.keys()[i+1])
+            T = data.reset_coords(names=unnescoords, 
+                                        drop=True).copy()[:, jstart:jend, istart:iend]
+        T_nlon = xray.DataArray(range(T.shape[2]), 
+                                                       dims=[loncoords],
+                                                       coords={loncoords: range(T.shape[2])})
+        T_nlat = xray.DataArray(range(T.shape[1]), 
+                                                       dims=[latcoords],
+                                                       coords={latcoords: range(T.shape[1])})
+        T.coords[loncoords] = T_nlon
+        T.coords[latcoords] = T_nlat
+        
+        original_coords = zip(lat.ravel(), lon.ravel())
+        newyx = zip(newlat.ravel(), newlon.ravel())
+        if cython:
+            tree = cKDTree(newyx)
+        else:
+            tree = KDTree(newyx)
+        distance, index = tree.query(original_coords)
+        
+        newlabel = np.empty(len(index), dtype=tuple)
+        index_test = np.zeros_like(index)
+        for i in range(len(index)):
+            index_test[i] = index[i]
+            newlabel[i] = newyx[index[i]]
+        
+        t_coords = T[0].stack(points=(latcoords, 
+                                      loncoords)).reset_coords(names=timecoords, drop=True)['points']
+        da_index = xray.DataArray(index, 
+                                                       dims=t_coords.dims,
+                                                       coords=t_coords.coords)
+        
+        da_label = xray.DataArray(newlabel, 
+                                                       dims=t_coords.dims,
+                                                       coords=t_coords.coords)
+        
+        
+        Nt = T.shape[0]
+        da_numpy = np.zeros((Nt, len(newlat[:, 0]), len(newlon[0, :])))
+        for t in range(Nt):
+            Ti = T[t].stack(points=(latcoords, 
+                                   loncoords)).reset_coords(names=timecoords, drop=True).copy()
+            Ti.coords['index'] = da_index
+            Ti.coords['label'] = da_label
+            Ti_grouped = Ti.groupby('label').mean().to_dataset(name=varname)
+
+            arrays = [[i for item in newlat[:, 0] for i in repeat(item, len(newlon[0, :]))], 
+                          np.tile(newlon[0, :], len(newlat[:, 0]))]
+            tuples = list(zip(*arrays))
+            Ti_panda_index = pd.MultiIndex.from_tuples(tuples, names=['lat', 'lon'])
+            Ti_panda = pd.Series(Ti_grouped[varname], index=Ti_panda_index)
+            Ti_panda_unstacked = Ti_panda.unstack(level=-1)
+            da_numpy[t] = Ti_panda_unstacked.values
+
+        da = xray.DataArray(da_numpy, dims=['day', 'lat', 'lon'], 
+                                              coords={'day': range(Nt), 'lat': newlat[:, 0], 'lon': newlon[0, :]}).to_dataset(name=varname)
+
+        return da
