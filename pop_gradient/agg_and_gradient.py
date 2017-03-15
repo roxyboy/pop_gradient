@@ -19,16 +19,16 @@ class POPFile(object):
             The units of diffusivity and viscosity are in [m^4/s]
         """
         self.nc = xray.open_dataset(fname, decode_times=False)
-        self.Ny, self.Nx = self.nc.TAREA.shape  
-        self._ah = ah
-        self._am = am
-        self.hconst = hconst
+        # self.Ny, self.Nx = self.nc.TAREA.shape  
+        # self._ah = ah
+        # self._am = am
+        # self.hconst = hconst
         
         ##########
         # mask
         ##########
-        self.maskT = self.nc.KMT > 1
-        self.maskU = self.nc.KMU > 1
+        #self.maskT = self.nc.KMT > 1
+        #self.maskU = self.nc.KMU > 1
 
         self.is3d = is3d
         if self.is3d:
@@ -267,10 +267,9 @@ class POPFile(object):
             result /= len(slices)
         return result
     
-    def aggregate_latlon(self, lat, lon, newlat, newlon, 
-                         varname='SST', 
-                         istart=0, iend=3500, jstart=400, jend=2000, 
-                         nroll=-1100, cython=True):
+    def aggregate_latlon(self, lat, lon, newlat, newlon, mask,
+                         varname, istart, iend, jstart, jend, 
+                         nroll, cython, *args):
         """
         Parameters
         --------------
@@ -280,17 +279,29 @@ class POPFile(object):
             raw latitude
         lon: numpy.array
             raw longitude
-        newlat: numpy.array
+        newlat : numpy.array
             latitude coordinate to regrid on
-        newlon: numpy.array
+        newlon : numpy.array
             longitude coordinate to regrid on
+        mask : xarray.Dataset
+            mask for land
+        varname : string
+            name of tracer
+        istart, iend, jstart, jend : integer
+            indexes of zonal and meridional extent of the raw data
+        nroll : integer
+            number of indicies to roll the data zonally
+        cython : boolean
+            criterion whether to use KDTree or cKDTree
+        *args : list
+            coordinate names
 
         Returns
         -------------
         da : xarray.Dataset
             new dataset with labels added
         """
-        data = self.nc[varname].where(self.maskT).roll(nlon=nroll)
+        data = self.nc[varname].where(mask).roll(nlon=nroll)
         assert data.values.ndim == 3
         assert lat.ndim == 2
         assert lon.ndim == 2
@@ -298,17 +309,18 @@ class POPFile(object):
         assert np.isnan(lon).any() == False
         
         ncoords = len(data.coords.keys())
-        timecoords = data.coords.keys()[0]
-        latcoords = data.coords.keys()[-2]
-        loncoords = data.coords.keys()[-1]
-        if ncoords-3 == 0:
-            pass
-        else:
+        assert ncoords == len(args)
+        # print ncoords
+        timecoords = args[0]
+        latcoords = args[1]
+        loncoords = args[2]
+        if len(args) > 3:
             unnescoords = []
-            for i in range(ncoords-3):
-                unnescoords.append(data.coords.keys()[i+1])
+            for i in range(3, ncoords):
+                unnescoords.append(args[i])
             T = data.reset_coords(names=unnescoords, 
                                         drop=True).copy()[:, jstart:jend, istart:iend]
+
         T_nlon = xray.DataArray(range(T.shape[2]), 
                                                        dims=[loncoords],
                                                        coords={loncoords: range(T.shape[2])})
